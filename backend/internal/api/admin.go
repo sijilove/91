@@ -57,7 +57,7 @@ type AdminServer struct {
 	OnRegenFailedPreviews      func(driveID string)
 	OnRegenFailedThumbnails    func(driveID string)
 	OnRegenFailedFingerprints  func(driveID string)
-	OnDeleteVideo              func(ctx context.Context, videoID string) (DeleteVideoResult, error)
+	OnDeleteVideo              func(ctx context.Context, videoID string, deleteSource bool) (DeleteVideoResult, error)
 	GetDriveGenerationStatuses func() map[string]DriveGenerationStatuses
 	// OnTeaserEnabledChanged 在 per-drive 预览视频开关被切换后调用。
 	// enabled=true 时上层应该重新把 pending 预览视频入队（类似旧的全局开关从关到开）；
@@ -103,6 +103,8 @@ type GenerationStatus struct {
 	CooldownUntil string `json:"cooldownUntil,omitempty"`
 	ScannedCount  int    `json:"scannedCount"`
 	AddedCount    int    `json:"addedCount"`
+	DoneCount     int    `json:"doneCount"`
+	TotalCount    int    `json:"totalCount"`
 }
 
 type DriveGenerationStatuses struct {
@@ -110,6 +112,7 @@ type DriveGenerationStatuses struct {
 	Thumbnail   GenerationStatus `json:"thumbnail"`
 	Preview     GenerationStatus `json:"preview"`
 	Fingerprint GenerationStatus `json:"fingerprint"`
+	Upload      GenerationStatus `json:"upload"`
 }
 
 type NightlyJobStatus struct {
@@ -125,6 +128,10 @@ const maxCrawlerScriptBytes = 2 * 1024 * 1024
 type DeleteVideoResult struct {
 	OK            bool `json:"ok"`
 	DeletedSource bool `json:"deletedSource"`
+}
+
+type deleteVideoReq struct {
+	DeleteSource bool `json:"deleteSource"`
 }
 
 func (a *AdminServer) Register(r chi.Router) {
@@ -637,6 +644,7 @@ type crawlerDTO struct {
 	ThumbnailGenerationStatus   GenerationStatus `json:"thumbnailGenerationStatus"`
 	PreviewGenerationStatus     GenerationStatus `json:"previewGenerationStatus"`
 	FingerprintGenerationStatus GenerationStatus `json:"fingerprintGenerationStatus"`
+	UploadGenerationStatus      GenerationStatus `json:"uploadGenerationStatus"`
 	ThumbnailReadyCount         int              `json:"thumbnailReadyCount"`
 	ThumbnailPendingCount       int              `json:"thumbnailPendingCount"`
 	ThumbnailFailedCount        int              `json:"thumbnailFailedCount"`
@@ -698,6 +706,9 @@ func (a *AdminServer) crawlerDTOForDrive(d *catalog.Drive, assets catalog.Crawle
 	if generation.Fingerprint.State == "" {
 		generation.Fingerprint.State = "idle"
 	}
+	if generation.Upload.State == "" {
+		generation.Upload.State = "idle"
+	}
 	lastCrawlAt := int64(0)
 	if raw := strings.TrimSpace(d.Credentials["last_crawl_at"]); raw != "" {
 		if v, err := strconv.ParseInt(raw, 10, 64); err == nil {
@@ -719,6 +730,7 @@ func (a *AdminServer) crawlerDTOForDrive(d *catalog.Drive, assets catalog.Crawle
 		ThumbnailGenerationStatus:   generation.Thumbnail,
 		PreviewGenerationStatus:     generation.Preview,
 		FingerprintGenerationStatus: generation.Fingerprint,
+		UploadGenerationStatus:      generation.Upload,
 		ThumbnailReadyCount:         assets.Thumbnail.Ready,
 		ThumbnailPendingCount:       assets.Thumbnail.Pending,
 		ThumbnailFailedCount:        assets.Thumbnail.Failed,
@@ -1824,12 +1836,21 @@ func (a *AdminServer) handleDeleteVideo(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, errors.New("invalid video id"))
 		return
 	}
+	var body deleteVideoReq
+	if r.Body != nil {
+		defer r.Body.Close()
+		decoder := json.NewDecoder(r.Body)
+		if err := decoder.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+	}
 	var (
 		result DeleteVideoResult
 		err    error
 	)
 	if a.OnDeleteVideo != nil {
-		result, err = a.OnDeleteVideo(r.Context(), id)
+		result, err = a.OnDeleteVideo(r.Context(), id, body.DeleteSource)
 	} else {
 		err = a.Catalog.DeleteVideoWithTombstone(r.Context(), id)
 		result = DeleteVideoResult{OK: err == nil}

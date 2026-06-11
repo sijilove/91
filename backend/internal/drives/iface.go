@@ -40,6 +40,12 @@ type Drive interface {
 	RootID() string
 }
 
+// Remover is an optional drive capability. It mirrors OpenList's optional
+// Remove interface: callers must type-assert before deleting a source file.
+type Remover interface {
+	Remove(ctx context.Context, fileID string) error
+}
+
 type Entry struct {
 	ID       string
 	Name     string

@@ -52,6 +52,19 @@ export function hideVideo(id: string): Promise<{ ok: boolean }> {
   );
 }
 
+export function deleteVideo(
+  id: string,
+  options: { deleteSource?: boolean } = {}
+): Promise<{ ok: boolean; deletedSource: boolean }> {
+  return apiJSON<{ ok: boolean; deletedSource: boolean }>(
+    `/admin/api/videos/${encodeURIComponent(id)}`,
+    {
+      method: "DELETE",
+      body: JSON.stringify({ deleteSource: !!options.deleteSource }),
+    }
+  );
+}
+
 export function recordView(id: string): Promise<{ views: number }> {
   return apiJSON<{ views: number }>(
     `/api/video/${encodeURIComponent(id)}/view`,

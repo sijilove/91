@@ -147,6 +147,46 @@ func (d *Driver) EnsureDir(context.Context, string) (string, error) {
 	return "", drives.ErrNotSupported
 }
 
+func (d *Driver) Remove(ctx context.Context, fileID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	videoPath, err := d.VideoPath(fileID)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(videoPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			removeThumbCandidates(d.ThumbPath, strings.TrimSuffix(fileID, filepath.Ext(fileID)))
+			return nil
+		}
+		return err
+	}
+	if info.IsDir() {
+		return errors.New("scriptcrawler: refusing to remove directory")
+	}
+	if err := os.Remove(videoPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	removeThumbCandidates(d.ThumbPath, strings.TrimSuffix(fileID, filepath.Ext(fileID)))
+	return nil
+}
+
+func removeThumbCandidates(pathFor func(string) (string, error), stem string) {
+	stem = strings.TrimSpace(stem)
+	if stem == "" {
+		return
+	}
+	for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp"} {
+		path, err := pathFor(stem + ext)
+		if err != nil {
+			continue
+		}
+		_ = os.Remove(path)
+	}
+}
+
 func safeJoin(root, fileID string) (string, error) {
 	id := strings.TrimSpace(fileID)
 	if id == "" || filepath.Base(id) != id {
@@ -170,3 +210,4 @@ func safeJoin(root, fileID string) (string, error) {
 }
 
 var _ drives.Drive = (*Driver)(nil)
+var _ drives.Remover = (*Driver)(nil)

@@ -593,6 +593,17 @@ func (d *Driver) Rename(ctx context.Context, fileID, newName string) error {
 	return nil
 }
 
+func (d *Driver) Remove(ctx context.Context, fileID string) error {
+	fileID = strings.TrimSpace(fileID)
+	if fileID == "" {
+		return errors.New("googledrive remove: empty file id")
+	}
+	if err := d.request(ctx, d.fileURL(fileID), http.MethodDelete, nil, nil); err != nil {
+		return fmt.Errorf("googledrive remove: %w", err)
+	}
+	return nil
+}
+
 func (d *Driver) findUploadedFileID(ctx context.Context, parentID, name, md5Hex string) (string, error) {
 	entries, err := d.List(ctx, parentID)
 	if err != nil {
@@ -623,6 +634,8 @@ func (d *Driver) findUploadedFileID(ctx context.Context, parentID, name, md5Hex 
 	}
 	return "", fmt.Errorf("googledrive upload: uploaded file %q not found in parent %q", name, parentID)
 }
+
+var _ drives.Remover = (*Driver)(nil)
 
 func isGoogleUploadHTTPRateLimit(status int, header http.Header, body []byte, apiErr apiErrorBody) bool {
 	if status == http.StatusTooManyRequests {

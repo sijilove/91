@@ -42,6 +42,7 @@ const (
 	endpointDownloadInfo = "/file/download_info"
 	endpointMkdir        = "/file/upload_request"
 	endpointRename       = "/file/rename"
+	endpointTrash        = "/file/trash"
 	endpointUpload       = "/file/upload_request"
 	endpointS3Auth       = "/file/s3_upload_object/auth"
 	endpointS3Parts      = "/file/s3_repare_upload_parts_batch"
@@ -545,6 +546,32 @@ func (d *Driver) Rename(ctx context.Context, fileID, newName string) error {
 	return nil
 }
 
+func (d *Driver) Remove(ctx context.Context, fileID string) error {
+	fileID = strings.TrimSpace(fileID)
+	if fileID == "" {
+		return errors.New("123pan remove: empty file id")
+	}
+	f, _, err := d.findFile(ctx, fileID)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return nil
+		}
+		return fmt.Errorf("123pan remove metadata: %w", err)
+	}
+	body := map[string]any{
+		"driveId":           0,
+		"operation":         true,
+		"fileTrashInfoList": []panFile{f},
+	}
+	if _, err := d.request(ctx, endpointTrash, http.MethodPost, func(req *resty.Request) {
+		req.SetBody(body)
+	}, nil); err != nil {
+		return fmt.Errorf("123pan remove: %w", err)
+	}
+	d.removeCachedFile(fileID)
+	return nil
+}
+
 func (d *Driver) EnsureDir(ctx context.Context, pathFromRoot string) (string, error) {
 	parts := splitPath(pathFromRoot)
 	currentID := d.rootID
@@ -942,6 +969,12 @@ func (d *Driver) renameCachedFile(fileID, newName string) {
 	}
 }
 
+func (d *Driver) removeCachedFile(fileID string) {
+	d.fileMu.Lock()
+	delete(d.files, fileID)
+	d.fileMu.Unlock()
+}
+
 func (d *Driver) cachedFile(fileID string) (panFile, string, bool) {
 	d.fileMu.RLock()
 	defer d.fileMu.RUnlock()
@@ -1111,3 +1144,4 @@ func guessMime(name string) string {
 }
 
 var _ drives.Drive = (*Driver)(nil)
+var _ drives.Remover = (*Driver)(nil)

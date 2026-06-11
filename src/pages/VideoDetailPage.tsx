@@ -7,6 +7,7 @@ import { VideoMetaHeader } from "@/components/VideoMetaHeader";
 import { VideoInfoPanel } from "@/components/VideoInfoPanel";
 import { RecommendedRail } from "@/components/RecommendedRail";
 import {
+  deleteVideo,
   fetchTags,
   fetchVideoDetail,
   hideVideo,
@@ -23,6 +24,10 @@ export default function VideoDetailPage() {
   const [loading, setLoading] = useState(true);
   const [tagSaving, setTagSaving] = useState(false);
   const [hideSaving, setHideSaving] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteSource, setDeleteSource] = useState(false);
+  const [deleteSaving, setDeleteSaving] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const detailTopRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -73,6 +78,36 @@ export default function VideoDetailPage() {
     } catch {
       setHideSaving(false);
       window.alert("隐藏失败，请稍后重试");
+    }
+  }
+
+  function handleOpenDelete() {
+    if (!detail || deleteSaving) return;
+    setDeleteSource(false);
+    setDeleteError("");
+    setDeleteOpen(true);
+  }
+
+  function handleCloseDelete() {
+    if (deleteSaving) return;
+    setDeleteOpen(false);
+    setDeleteError("");
+  }
+
+  async function handleConfirmDelete() {
+    if (!detail || deleteSaving) return;
+    setDeleteSaving(true);
+    setDeleteError("");
+    try {
+      await deleteVideo(detail.id, { deleteSource });
+      navigate("/list", { replace: true });
+    } catch {
+      setDeleteError(
+        deleteSource
+          ? "删除失败。源文件未能删除时，管理库记录会保留。"
+          : "删除失败，请稍后重试。"
+      );
+      setDeleteSaving(false);
     }
   }
 
@@ -199,7 +234,9 @@ export default function VideoDetailPage() {
                 <VideoActions
                   video={detail}
                   onHideVideo={handleHideVideo}
+                  onDeleteVideo={handleOpenDelete}
                   hideSaving={hideSaving}
+                  deleteSaving={deleteSaving}
                 />
               </section>
 
@@ -215,6 +252,59 @@ export default function VideoDetailPage() {
           </div>
         </div>
       </div>
+
+      {deleteOpen && (
+        <div className="vd-delete-modal" role="presentation">
+          <div
+            className="vd-delete-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="vd-delete-title"
+          >
+            <div className="vd-delete-head">
+              <h2 id="vd-delete-title" className="vd-delete-title">
+                删除视频
+              </h2>
+              <p className="vd-delete-text">
+                确定删除「{detail.title}」吗？此操作会从管理库移除该视频。
+              </p>
+            </div>
+
+            <label className="vd-delete-option">
+              <input
+                type="checkbox"
+                checked={deleteSource}
+                disabled={deleteSaving}
+                onChange={(e) => setDeleteSource(e.target.checked)}
+              />
+              <span>
+                <strong>同时删除网盘中的源文件</strong>
+              </span>
+            </label>
+
+            {deleteError && <div className="vd-delete-error">{deleteError}</div>}
+
+            <div className="vd-delete-actions">
+              <button
+                type="button"
+                className="vd-delete-action vd-delete-cancel"
+                onClick={handleCloseDelete}
+                disabled={deleteSaving}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="vd-delete-action vd-delete-confirm"
+                onClick={handleConfirmDelete}
+                disabled={deleteSaving}
+              >
+                {deleteSaving ? "删除中..." : "删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </AppShell>
   );
 }

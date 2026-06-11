@@ -1243,7 +1243,7 @@ func TestDeleteVideoRemovesGeneratedAssetsKeepsLocalOriginalAndTombstones(t *tes
 		cfg: &config.Config{Storage: config.Storage{LocalPreviewDir: localDir}},
 		cat: cat,
 	}
-	result, err := app.deleteVideo(ctx, "localstorage-local-main-file")
+	result, err := app.deleteVideo(ctx, "localstorage-local-main-file", false)
 	if err != nil {
 		t.Fatalf("delete video: %v", err)
 	}
@@ -1267,6 +1267,73 @@ func TestDeleteVideoRemovesGeneratedAssetsKeepsLocalOriginalAndTombstones(t *tes
 	}
 	if _, err := os.Stat(originalVideo); err != nil {
 		t.Fatalf("original local video was removed: %v", err)
+	}
+}
+
+func TestDeleteVideoRemovesSourceFileWhenRequested(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	localDir := filepath.Join(root, "previews")
+	cat, err := catalog.Open(filepath.Join(t.TempDir(), "catalog.db"))
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() { _ = cat.Close() })
+
+	previewPath := filepath.Join(localDir, "video-with-source.mp4")
+	thumbPath := filepath.Join(localDir, "thumbs", "video-with-source.jpg")
+	for _, path := range []string{previewPath, thumbPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte("file"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	now := time.Now()
+	if err := cat.UpsertVideo(ctx, &catalog.Video{
+		ID:            "video-with-source",
+		DriveID:       "source-drive",
+		FileID:        "source-file",
+		FileName:      "clip.mp4",
+		Title:         "Source File",
+		PreviewLocal:  previewPath,
+		PreviewStatus: "ready",
+		ThumbnailURL:  "/p/thumb/video-with-source",
+		Size:          123,
+		PublishedAt:   now,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}); err != nil {
+		t.Fatalf("seed video: %v", err)
+	}
+
+	registry := proxy.NewRegistry()
+	drv := &serverRemovableFakeDrive{id: "source-drive"}
+	registry.Set(drv.ID(), drv)
+	app := &App{
+		cfg:      &config.Config{Storage: config.Storage{LocalPreviewDir: localDir}},
+		cat:      cat,
+		registry: registry,
+	}
+	result, err := app.deleteVideo(ctx, "video-with-source", true)
+	if err != nil {
+		t.Fatalf("delete video: %v", err)
+	}
+	if !result.OK || !result.DeletedSource {
+		t.Fatalf("delete result = %#v, want source deleted", result)
+	}
+	if got, want := drv.removedFileID, "source-file"; got != want {
+		t.Fatalf("removed source fileID = %q, want %q", got, want)
+	}
+	if _, err := cat.GetVideo(ctx, "video-with-source"); err != sql.ErrNoRows {
+		t.Fatalf("deleted video lookup error = %v, want sql.ErrNoRows", err)
+	}
+	for _, path := range []string{previewPath, thumbPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("generated asset %s still exists, stat err=%v", path, err)
+		}
 	}
 }
 
@@ -1326,7 +1393,7 @@ func TestDeleteVideoRemovesSpider91SourceFile(t *testing.T) {
 		t.Fatalf("seed video: %v", err)
 	}
 
-	result, err := app.deleteVideo(ctx, "spider91-spider-main-source")
+	result, err := app.deleteVideo(ctx, "spider91-spider-main-source", true)
 	if err != nil {
 		t.Fatalf("delete spider video: %v", err)
 	}
@@ -1739,6 +1806,22 @@ type serverFakeKindDrive struct {
 
 func (d *serverFakeKindDrive) Kind() string { return d.kind }
 func (d *serverFakeKindDrive) ID() string   { return d.id }
+
+type serverRemovableFakeDrive struct {
+	serverFakeDrive
+	id            string
+	removedFileID string
+}
+
+func (d *serverRemovableFakeDrive) Kind() string { return "fake-removable" }
+func (d *serverRemovableFakeDrive) ID() string   { return d.id }
+func (d *serverRemovableFakeDrive) Remove(ctx context.Context, fileID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	d.removedFileID = fileID
+	return nil
+}
 
 type serverFakeSpider91MigrationRunner struct {
 	called int

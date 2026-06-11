@@ -89,6 +89,24 @@ CREATE INDEX IF NOT EXISTS idx_deleted_videos_drive_hash
 CREATE INDEX IF NOT EXISTS idx_deleted_videos_drive_signature
     ON deleted_videos(drive_id, file_name, size_bytes);
 
+-- 爬虫来源记录。用于把已确认重复的 source_id 写回 seen 列表，
+-- 避免后续爬虫反复下载同一个候选视频。
+CREATE TABLE IF NOT EXISTS crawler_seen_sources (
+    kind               TEXT NOT NULL,
+    drive_id           TEXT NOT NULL,
+    source_id          TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'imported', -- imported / duplicate
+    canonical_video_id TEXT NOT NULL DEFAULT '',
+    sampled_sha256     TEXT NOT NULL DEFAULT '',
+    size_bytes         INTEGER NOT NULL DEFAULT 0,
+    first_seen_at      INTEGER NOT NULL,
+    last_seen_at       INTEGER NOT NULL,
+    PRIMARY KEY (kind, drive_id, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_crawler_seen_sources_drive
+    ON crawler_seen_sources(kind, drive_id, status);
+
 -- 网盘账户
 CREATE TABLE IF NOT EXISTS drives (
     id            TEXT PRIMARY KEY,

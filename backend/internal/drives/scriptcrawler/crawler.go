@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,18 +24,23 @@ import (
 	"time"
 
 	"github.com/video-site/backend/internal/catalog"
+	"github.com/video-site/backend/internal/fingerprint"
 	"github.com/video-site/backend/internal/mediaasset"
 	"golang.org/x/net/proxy"
 )
 
 const (
-	DefaultTargetNew = 10
-	defaultUserAgent = "Mozilla/5.0 (compatible; video-site-91-scriptcrawler/1.0)"
+	DefaultTargetNew           = 10
+	defaultUserAgent           = "Mozilla/5.0 (compatible; video-site-91-scriptcrawler/1.0)"
+	defaultCandidateMultiplier = 10
+	defaultCandidateFloorExtra = 50
+	defaultCandidateBudgetMax  = 500
 )
 
 type CrawlerConfig struct {
 	Driver          *Driver
 	Catalog         *catalog.Catalog
+	CrawlerName     string
 	SourceKind      string
 	PythonPath      string
 	ScriptPath      string
@@ -75,16 +81,17 @@ func NewCrawler(cfg CrawlerConfig) *Crawler {
 }
 
 type CrawlResult struct {
-	TargetNew    int
-	TotalEntries int
-	NewVideos    int
-	Skipped      int
-	Failed       int
-	SeenSnapshot int
-	StartedAt    time.Time
-	FinishedAt   time.Time
-	JobFile      string
-	SeenFile     string
+	TargetNew       int
+	CandidateBudget int
+	TotalEntries    int
+	NewVideos       int
+	Skipped         int
+	Failed          int
+	SeenSnapshot    int
+	StartedAt       time.Time
+	FinishedAt      time.Time
+	JobFile         string
+	SeenFile        string
 }
 
 type CrawlProgress struct {
@@ -105,6 +112,8 @@ type Job struct {
 	RunID             string          `json:"run_id"`
 	CrawlerID         string          `json:"crawler_id"`
 	TargetNew         int             `json:"target_new"`
+	UniqueTarget      int             `json:"unique_target,omitempty"`
+	CandidateBudget   int             `json:"candidate_budget,omitempty"`
 	SeenSourceIDsFile string          `json:"seen_source_ids_file"`
 	OutputDir         string          `json:"output_dir"`
 	Config            json.RawMessage `json:"config"`
@@ -253,11 +262,12 @@ func (c *Crawler) RunOnce(ctx context.Context, targetNew int) (*CrawlResult, err
 	if targetNew <= 0 {
 		targetNew = DefaultTargetNew
 	}
+	candidateBudget := candidateBudgetForTarget(targetNew)
 	if err := c.cfg.Driver.Init(ctx); err != nil {
 		return nil, fmt.Errorf("scriptcrawler: driver init: %w", err)
 	}
 
-	result := &CrawlResult{TargetNew: targetNew, StartedAt: time.Now()}
+	result := &CrawlResult{TargetNew: targetNew, CandidateBudget: candidateBudget, StartedAt: time.Now()}
 	defer func() { result.FinishedAt = time.Now() }()
 	emit := func(p CrawlProgress) {
 		if c.cfg.OnProgress == nil {
@@ -293,11 +303,11 @@ func (c *Crawler) RunOnce(ctx context.Context, targetNew int) (*CrawlResult, err
 	result.SeenSnapshot = seenCount
 	emit(CrawlProgress{})
 
-	if err := c.writeJobFile(jobPath, runID, targetNew, seenPath); err != nil {
+	if err := c.writeJobFile(jobPath, runID, targetNew, candidateBudget, seenPath); err != nil {
 		return result, fmt.Errorf("scriptcrawler: write job: %w", err)
 	}
 
-	cmd, stdout, err := c.startScript(ctx, jobPath, targetNew)
+	cmd, stdout, err := c.startScript(ctx, jobPath, targetNew, candidateBudget)
 	if err != nil {
 		return result, fmt.Errorf("scriptcrawler: start: %w", err)
 	}
@@ -408,7 +418,7 @@ func (c *Crawler) writeSeenSourceIDs(ctx context.Context, path string) (int, err
 	return len(seen), nil
 }
 
-func (c *Crawler) writeJobFile(path, runID string, targetNew int, seenPath string) error {
+func (c *Crawler) writeJobFile(path, runID string, targetNew, candidateBudget int, seenPath string) error {
 	cfg := json.RawMessage([]byte("{}"))
 	if raw := strings.TrimSpace(c.cfg.ConfigJSON); raw != "" {
 		if !json.Valid([]byte(raw)) {
@@ -425,7 +435,9 @@ func (c *Crawler) writeJobFile(path, runID string, targetNew int, seenPath strin
 		Mode:              "crawl",
 		RunID:             runID,
 		CrawlerID:         c.cfg.Driver.ID(),
-		TargetNew:         targetNew,
+		TargetNew:         candidateBudget,
+		UniqueTarget:      targetNew,
+		CandidateBudget:   candidateBudget,
 		SeenSourceIDsFile: seenPath,
 		OutputDir:         outputDir,
 		Config:            cfg,
@@ -442,7 +454,7 @@ func (c *Crawler) writeJobFile(path, runID string, targetNew int, seenPath strin
 	return os.Rename(tmp, path)
 }
 
-func (c *Crawler) startScript(ctx context.Context, jobPath string, targetNew int) (*exec.Cmd, io.ReadCloser, error) {
+func (c *Crawler) startScript(ctx context.Context, jobPath string, targetNew, candidateBudget int) (*exec.Cmd, io.ReadCloser, error) {
 	cmd := exec.CommandContext(ctx, c.cfg.PythonPath, c.cfg.ScriptPath, "--job", jobPath)
 	if strings.TrimSpace(c.cfg.WorkDir) != "" {
 		cmd.Dir = c.cfg.WorkDir
@@ -466,7 +478,7 @@ func (c *Crawler) startScript(ctx context.Context, jobPath string, targetNew int
 		_ = stdout.Close()
 		return nil, nil, err
 	}
-	log.Printf("[scriptcrawler] drive=%s exec %s --job=%s target_new=%d", c.cfg.Driver.ID(), c.cfg.ScriptPath, jobPath, targetNew)
+	log.Printf("[scriptcrawler] drive=%s exec %s --job=%s unique_target=%d candidate_budget=%d", c.cfg.Driver.ID(), c.cfg.ScriptPath, jobPath, targetNew, candidateBudget)
 	if err := cmd.Start(); err != nil {
 		_ = stdout.Close()
 		_ = stderr.Close()
@@ -493,7 +505,8 @@ func (c *Crawler) processItem(ctx context.Context, item Item) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	videoID := BuildVideoIDForKind(c.sourceKind(), c.cfg.Driver.ID(), sourceID)
+	sourceKind := c.sourceKind()
+	videoID := BuildVideoIDForKind(sourceKind, c.cfg.Driver.ID(), sourceID)
 	if deleted, err := c.cfg.Catalog.IsVideoDeleted(ctx, videoID); err != nil {
 		return false, err
 	} else if deleted {
@@ -513,25 +526,6 @@ func (c *Crawler) processItem(ctx context.Context, item Item) (bool, error) {
 		return false, fmt.Errorf("video: %w", err)
 	}
 
-	thumbReady := false
-	if item.Thumbnail.URL != "" || item.Thumbnail.LocalFile != "" {
-		thumbFile := sourceID + detectThumbExt(item.Thumbnail.URL, item.Thumbnail.LocalFile)
-		thumbPath, err := c.cfg.Driver.ThumbPath(thumbFile)
-		if err == nil {
-			if _, err := c.materializeMedia(ctx, item.Thumbnail, thumbPath, item.DetailURL, false); err != nil {
-				log.Printf("[scriptcrawler] drive=%s source_id=%s thumbnail failed: %v", c.cfg.Driver.ID(), sourceID, err)
-			} else if c.cfg.CommonThumbDir != "" {
-				if err := os.MkdirAll(c.cfg.CommonThumbDir, 0o755); err != nil {
-					log.Printf("[scriptcrawler] drive=%s common thumbs mkdir: %v", c.cfg.Driver.ID(), err)
-				} else if err := copyFileAtomic(thumbPath, mediaasset.ThumbnailPathInDir(c.cfg.CommonThumbDir, videoID)); err != nil {
-					log.Printf("[scriptcrawler] drive=%s source_id=%s copy thumbnail: %v", c.cfg.Driver.ID(), sourceID, err)
-				} else {
-					thumbReady = true
-				}
-			}
-		}
-	}
-
 	now := time.Now()
 	title := strings.TrimSpace(item.Title)
 	if title == "" {
@@ -544,6 +538,9 @@ func (c *Crawler) processItem(ctx context.Context, item Item) (bool, error) {
 	tags := cleanStringList(item.Tags)
 	if matched, err := c.cfg.Catalog.MatchTags(ctx, title+" "+author+" "+strings.Join(tags, " ")); err == nil {
 		tags = mergeStringLists(tags, matched)
+	}
+	if crawlerTag := c.crawlerTagName(); crawlerTag != "" {
+		tags = mergeStringLists(tags, []string{crawlerTag})
 	}
 	publishedAt := now
 	if parsed := parsePublishedAt(item.PublishedAt); !parsed.IsZero() {
@@ -572,12 +569,52 @@ func (c *Crawler) processItem(ctx context.Context, item Item) (bool, error) {
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
+	sampled, err := fingerprint.Compute(ctx, c.cfg.Driver, v, fingerprint.Config{}, c.cfg.HTTPClient)
+	if err != nil {
+		_ = os.Remove(videoPath)
+		return false, fmt.Errorf("fingerprint: %w", err)
+	}
+	v.SampledSHA256 = sampled
+	v.FingerprintStatus = "ready"
+	if duplicate, err := c.cfg.Catalog.FindEquivalentVideo(ctx, v); err == nil && duplicate != nil {
+		_ = os.Remove(videoPath)
+		if markErr := c.cfg.Catalog.MarkCrawlerSourceSeen(ctx, sourceKind, c.cfg.Driver.ID(), sourceID, "duplicate", duplicate.ID, sampled, size); markErr != nil {
+			log.Printf("[scriptcrawler] drive=%s source_id=%s mark duplicate seen: %v", c.cfg.Driver.ID(), sourceID, markErr)
+		}
+		log.Printf("[scriptcrawler] drive=%s source_id=%s duplicate_of=%s title=%q size=%d", c.cfg.Driver.ID(), sourceID, duplicate.ID, title, size)
+		return false, nil
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		_ = os.Remove(videoPath)
+		return false, fmt.Errorf("duplicate lookup: %w", err)
+	}
+
+	thumbReady := false
+	if item.Thumbnail.URL != "" || item.Thumbnail.LocalFile != "" {
+		thumbFile := sourceID + detectThumbExt(item.Thumbnail.URL, item.Thumbnail.LocalFile)
+		thumbPath, err := c.cfg.Driver.ThumbPath(thumbFile)
+		if err == nil {
+			if _, err := c.materializeMedia(ctx, item.Thumbnail, thumbPath, item.DetailURL, false); err != nil {
+				log.Printf("[scriptcrawler] drive=%s source_id=%s thumbnail failed: %v", c.cfg.Driver.ID(), sourceID, err)
+			} else if c.cfg.CommonThumbDir != "" {
+				if err := os.MkdirAll(c.cfg.CommonThumbDir, 0o755); err != nil {
+					log.Printf("[scriptcrawler] drive=%s common thumbs mkdir: %v", c.cfg.Driver.ID(), err)
+				} else if err := copyFileAtomic(thumbPath, mediaasset.ThumbnailPathInDir(c.cfg.CommonThumbDir, videoID)); err != nil {
+					log.Printf("[scriptcrawler] drive=%s source_id=%s copy thumbnail: %v", c.cfg.Driver.ID(), sourceID, err)
+				} else {
+					thumbReady = true
+				}
+			}
+		}
+	}
 	if thumbReady {
 		v.ThumbnailURL = "/p/thumb/" + v.ID
 	}
 	if err := c.cfg.Catalog.UpsertVideo(ctx, v); err != nil {
 		_ = os.Remove(videoPath)
 		return false, err
+	}
+	if err := c.cfg.Catalog.MarkCrawlerSourceSeen(ctx, sourceKind, c.cfg.Driver.ID(), sourceID, "imported", v.ID, sampled, size); err != nil {
+		log.Printf("[scriptcrawler] drive=%s source_id=%s mark imported seen: %v", c.cfg.Driver.ID(), sourceID, err)
 	}
 	log.Printf("[scriptcrawler] drive=%s source_id=%s ok title=%q size=%d", c.cfg.Driver.ID(), sourceID, title, size)
 	return true, nil
@@ -896,6 +933,36 @@ func (c *Crawler) sourceKind() string {
 		return v
 	}
 	return Kind
+}
+
+func (c *Crawler) crawlerTagName() string {
+	if c == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(c.cfg.CrawlerName); v != "" {
+		return v
+	}
+	if c.cfg.Driver != nil {
+		return strings.TrimSpace(c.cfg.Driver.ID())
+	}
+	return ""
+}
+
+func candidateBudgetForTarget(targetNew int) int {
+	if targetNew <= 0 {
+		targetNew = DefaultTargetNew
+	}
+	budget := targetNew * defaultCandidateMultiplier
+	if floor := targetNew + defaultCandidateFloorExtra; budget < floor {
+		budget = floor
+	}
+	if budget > defaultCandidateBudgetMax {
+		budget = defaultCandidateBudgetMax
+	}
+	if budget < targetNew {
+		return targetNew
+	}
+	return budget
 }
 
 func BuildVideoID(driveID, sourceID string) string {

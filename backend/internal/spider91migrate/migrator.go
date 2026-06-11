@@ -82,6 +82,15 @@ type UploadResult struct {
 	Size   int64
 }
 
+type UploadProgress struct {
+	DriveID      string
+	State        string
+	CurrentTitle string
+	QueueLength  int
+	DoneCount    int
+	TotalCount   int
+}
+
 const (
 	spider91UploadDirName          = "91 Spider"
 	scriptCrawlerUploadRootDirName = "Script Crawlers"
@@ -254,9 +263,10 @@ type Config struct {
 	// CaptchaCooldown 是迁移 worker 在遇到 PikPak captcha 错误（error_code
 	// 4002 / 9）后整体进入冷却的时长。冷却期间 runOnce 直接返回，不再发起任何
 	// PikPak API 请求，避免被进一步风控。0 时默认 5 分钟；< 0 关闭冷却（仅用于测试）。
-	CaptchaCooldown time.Duration
-	CommonThumbDir  string
-	OnMigrated      func(videoID string)
+	CaptchaCooldown  time.Duration
+	CommonThumbDir   string
+	OnMigrated       func(videoID string)
+	OnUploadProgress func(UploadProgress)
 }
 
 type Migrator struct {
@@ -442,6 +452,20 @@ func (m *Migrator) runOnce(ctx context.Context) {
 			log.Printf("[spider91migrate] backfilled %d %s file name(s) to desired format", renamed, pp.Kind())
 		}
 	}
+}
+
+func (m *Migrator) reportUploadProgress(progress UploadProgress) {
+	if m == nil || m.cfg.OnUploadProgress == nil {
+		return
+	}
+	progress.DriveID = strings.TrimSpace(progress.DriveID)
+	if progress.DriveID == "" {
+		return
+	}
+	if progress.State == "" {
+		progress.State = "idle"
+	}
+	m.cfg.OnUploadProgress(progress)
 }
 
 // targetKindForLog 把当前目标盘 kind 转成对人友好的简称，用于日志。
@@ -669,8 +693,17 @@ func (m *Migrator) migrateDrive(ctx context.Context, plan migrationPlan) (int, e
 	if skip < len(files) {
 		candidates = files[skip:]
 	} else {
+		m.reportUploadProgress(UploadProgress{DriveID: src.ID(), State: "idle"})
 		return 0, nil
 	}
+	totalCandidates := len(candidates)
+	m.reportUploadProgress(UploadProgress{
+		DriveID:     src.ID(),
+		State:       "uploading",
+		QueueLength: totalCandidates,
+		TotalCount:  totalCandidates,
+	})
+	defer m.reportUploadProgress(UploadProgress{DriveID: src.ID(), State: "idle"})
 
 	localVideos, err := m.cfg.Catalog.ListVideosByDriveID(ctx, src.ID(), 100000)
 	if err != nil {
@@ -684,7 +717,8 @@ func (m *Migrator) migrateDrive(ctx context.Context, plan migrationPlan) (int, e
 	}
 
 	migrated := 0
-	for _, f := range candidates {
+	processed := 0
+	for index, f := range candidates {
 		if err := ctx.Err(); err != nil {
 			return migrated, err
 		}
@@ -694,11 +728,35 @@ func (m *Migrator) migrateDrive(ctx context.Context, plan migrationPlan) (int, e
 
 		v := m.findVideoForLocalFile(ctx, plan, f.name, byFileID)
 		if v == nil {
+			processed++
+			m.reportUploadProgress(UploadProgress{
+				DriveID:     src.ID(),
+				State:       "uploading",
+				QueueLength: maxInt(totalCandidates-processed, 0),
+				DoneCount:   processed,
+				TotalCount:  totalCandidates,
+			})
 			continue
 		}
+		m.reportUploadProgress(UploadProgress{
+			DriveID:      src.ID(),
+			State:        "uploading",
+			CurrentTitle: v.Title,
+			QueueLength:  maxInt(totalCandidates-index-1, 0),
+			DoneCount:    processed,
+			TotalCount:   totalCandidates,
+		})
 
 		if v.DriveID != src.ID() {
 			CleanupSpider91Local(src, f.name)
+			processed++
+			m.reportUploadProgress(UploadProgress{
+				DriveID:     src.ID(),
+				State:       "uploading",
+				QueueLength: maxInt(totalCandidates-processed, 0),
+				DoneCount:   processed,
+				TotalCount:  totalCandidates,
+			})
 			continue
 		}
 
@@ -718,6 +776,14 @@ func (m *Migrator) migrateDrive(ctx context.Context, plan migrationPlan) (int, e
 					m.cfg.OnMigrated(v.ID)
 				}
 			}
+			processed++
+			m.reportUploadProgress(UploadProgress{
+				DriveID:     src.ID(),
+				State:       "uploading",
+				QueueLength: maxInt(totalCandidates-processed, 0),
+				DoneCount:   processed,
+				TotalCount:  totalCandidates,
+			})
 			continue
 		}
 
@@ -728,6 +794,14 @@ func (m *Migrator) migrateDrive(ctx context.Context, plan migrationPlan) (int, e
 				continue
 			}
 			if !ready {
+				processed++
+				m.reportUploadProgress(UploadProgress{
+					DriveID:     src.ID(),
+					State:       "uploading",
+					QueueLength: maxInt(totalCandidates-processed, 0),
+					DoneCount:   processed,
+					TotalCount:  totalCandidates,
+				})
 				continue
 			}
 		}
@@ -752,8 +826,23 @@ func (m *Migrator) migrateDrive(ctx context.Context, plan migrationPlan) (int, e
 				m.cfg.OnMigrated(v.ID)
 			}
 		}
+		processed++
+		m.reportUploadProgress(UploadProgress{
+			DriveID:     src.ID(),
+			State:       "uploading",
+			QueueLength: maxInt(totalCandidates-processed, 0),
+			DoneCount:   processed,
+			TotalCount:  totalCandidates,
+		})
 	}
 	return migrated, nil
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (m *Migrator) findVideoForLocalFile(ctx context.Context, plan migrationPlan, localFile string, byFileID map[string]*catalog.Video) *catalog.Video {

@@ -86,6 +86,7 @@ func main() {
 		Registry:         app.registry,
 		GetTargetDriveID: func() string { return app.Spider91UploadDriveID() },
 		CommonThumbDir:   app.commonThumbsDir(),
+		OnUploadProgress: app.updateCrawlerUploadProgress,
 	})
 
 	// 初始化本地内置盘；外部云盘放到 HTTP 服务启动后异步挂载，避免上游
@@ -217,8 +218,8 @@ func main() {
 		OnRegenFailedFingerprints: func(driveID string) {
 			go app.regenFailedFingerprints(ctx, driveID)
 		},
-		OnDeleteVideo: func(reqCtx context.Context, videoID string) (api.DeleteVideoResult, error) {
-			return app.deleteVideo(reqCtx, videoID)
+		OnDeleteVideo: func(reqCtx context.Context, videoID string, deleteSource bool) (api.DeleteVideoResult, error) {
+			return app.deleteVideo(reqCtx, videoID, deleteSource)
 		},
 		GetDriveGenerationStatuses: func() map[string]api.DriveGenerationStatuses {
 			return app.driveGenerationStatuses()
@@ -363,11 +364,23 @@ type App struct {
 	// crawlerUploadRunning 去重"保存上传目标后检查本地未上传文件"的后台任务。
 	crawlerUploadMu      sync.Mutex
 	crawlerUploadRunning map[string]bool
+
+	// uploadProgress 跟踪脚本爬虫迁移到云盘时的实时上传状态。
+	uploadProgressMu sync.Mutex
+	uploadProgress   map[string]driveUploadProgress
 }
 
 type driveScanProgress struct {
 	Scanned int
 	Added   int
+}
+
+type driveUploadProgress struct {
+	State        string
+	CurrentTitle string
+	QueueLength  int
+	DoneCount    int
+	TotalCount   int
 }
 
 type spider91MigrationRunner interface {
@@ -522,6 +535,13 @@ func (a *App) driveGenerationStatuses() map[string]api.DriveGenerationStatuses {
 	}
 	a.scanQueueMu.Unlock()
 
+	a.uploadProgressMu.Lock()
+	uploadProgresses := make(map[string]driveUploadProgress, len(a.uploadProgress))
+	for id, progress := range a.uploadProgress {
+		uploadProgresses[id] = progress
+	}
+	a.uploadProgressMu.Unlock()
+
 	a.mu.Lock()
 	previewWorkers := make(map[string]*preview.Worker, len(a.workers))
 	for id, worker := range a.workers {
@@ -537,7 +557,7 @@ func (a *App) driveGenerationStatuses() map[string]api.DriveGenerationStatuses {
 	}
 	a.mu.Unlock()
 
-	out := make(map[string]api.DriveGenerationStatuses, len(scanningDrives)+len(previewWorkers)+len(thumbWorkers)+len(fingerprintWorkers))
+	out := make(map[string]api.DriveGenerationStatuses, len(scanningDrives)+len(previewWorkers)+len(thumbWorkers)+len(fingerprintWorkers)+len(uploadProgresses))
 	for id, running := range scanningDrives {
 		if !running {
 			continue
@@ -566,7 +586,73 @@ func (a *App) driveGenerationStatuses() map[string]api.DriveGenerationStatuses {
 		status.Fingerprint = generationStatusFromFingerprint(worker.Status())
 		out[id] = status
 	}
+	for id, progress := range uploadProgresses {
+		state := progress.State
+		if state == "" {
+			state = "idle"
+		}
+		status := out[id]
+		status.Upload = api.GenerationStatus{
+			State:        state,
+			CurrentTitle: progress.CurrentTitle,
+			QueueLength:  progress.QueueLength,
+			DoneCount:    progress.DoneCount,
+			TotalCount:   progress.TotalCount,
+		}
+		out[id] = status
+	}
 	return out
+}
+
+func (a *App) updateCrawlerUploadProgress(progress spider91migrate.UploadProgress) {
+	driveID := strings.TrimSpace(progress.DriveID)
+	if driveID == "" {
+		return
+	}
+	state := strings.TrimSpace(progress.State)
+	if state == "" {
+		state = "idle"
+	}
+	a.uploadProgressMu.Lock()
+	if a.uploadProgress == nil {
+		a.uploadProgress = make(map[string]driveUploadProgress)
+	}
+	if state == "idle" {
+		delete(a.uploadProgress, driveID)
+		a.uploadProgressMu.Unlock()
+		return
+	}
+	a.uploadProgress[driveID] = driveUploadProgress{
+		State:        state,
+		CurrentTitle: strings.TrimSpace(progress.CurrentTitle),
+		QueueLength:  progress.QueueLength,
+		DoneCount:    progress.DoneCount,
+		TotalCount:   progress.TotalCount,
+	}
+	a.uploadProgressMu.Unlock()
+}
+
+func (a *App) clearCrawlerUploadProgress(driveID string) bool {
+	driveID = strings.TrimSpace(driveID)
+	if driveID == "" {
+		return false
+	}
+	a.uploadProgressMu.Lock()
+	_, ok := a.uploadProgress[driveID]
+	delete(a.uploadProgress, driveID)
+	a.uploadProgressMu.Unlock()
+	return ok
+}
+
+func (a *App) clearAllCrawlerUploadProgress() []string {
+	a.uploadProgressMu.Lock()
+	ids := make([]string, 0, len(a.uploadProgress))
+	for id := range a.uploadProgress {
+		ids = append(ids, id)
+	}
+	a.uploadProgress = nil
+	a.uploadProgressMu.Unlock()
+	return ids
 }
 
 func generationStatusFromPreview(status preview.TaskStatus) api.GenerationStatus {
@@ -905,6 +991,7 @@ func (a *App) attachScriptCrawler(d *catalog.Drive, drv *scriptcrawler.Driver) {
 	c := scriptcrawler.NewCrawler(scriptcrawler.CrawlerConfig{
 		Driver:         drv,
 		Catalog:        a.cat,
+		CrawlerName:    d.Name,
 		SourceKind:     sourceKind,
 		PythonPath:     pythonPath,
 		ScriptPath:     scriptPath,
@@ -929,6 +1016,7 @@ func (a *App) attachScriptCrawler(d *catalog.Drive, drv *scriptcrawler.Driver) {
 	a.scriptCrawlers[driveID] = c
 	a.mu.Unlock()
 
+	a.ensureScriptCrawlerNameTag(driveID, sourceKind, d.Name)
 	if sourceKind == spider91.Kind {
 		a.ensureSpider91SourceTag(driveID)
 	}
@@ -955,6 +1043,24 @@ func (a *App) ensureSpider91SourceTag(driveID string) {
 		prefix := "spider91-" + driveID + "-"
 		if _, err := a.cat.EnsureTagForVideoIDPrefix(bgCtx, prefix, spider91.DefaultTag, nil, "system"); err != nil {
 			log.Printf("[spider91] ensure %q tag: %v", spider91.DefaultTag, err)
+		}
+	}()
+}
+
+func (a *App) ensureScriptCrawlerNameTag(driveID, sourceKind, crawlerName string) {
+	tagName := strings.TrimSpace(crawlerName)
+	if tagName == "" {
+		tagName = strings.TrimSpace(driveID)
+	}
+	if tagName == "" {
+		return
+	}
+	bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	go func() {
+		defer cancel()
+		prefix := scriptcrawler.BuildVideoIDForKind(sourceKind, driveID, "")
+		if _, err := a.cat.EnsureTagForVideoIDPrefix(bgCtx, prefix, tagName, nil, "legacy"); err != nil {
+			log.Printf("[scriptcrawler] drive=%s ensure crawler tag %q: %v", driveID, tagName, err)
 		}
 	}()
 }
@@ -1185,6 +1291,13 @@ func (a *App) driveHasActiveWork(driveID string) bool {
 		return true
 	}
 
+	a.uploadProgressMu.Lock()
+	uploading := a.uploadProgress[driveID].State != ""
+	a.uploadProgressMu.Unlock()
+	if uploading {
+		return true
+	}
+
 	a.mu.Lock()
 	previewWorker := a.workers[driveID]
 	thumbWorker := a.thumbWorkers[driveID]
@@ -1304,10 +1417,11 @@ func (a *App) stopDriveTasks(ctx context.Context, driveID string) bool {
 	canceled := a.cancelDriveTaskContexts(driveID)
 	queued := a.clearQueuedDriveTask(driveID)
 	fingerprintQueued := a.clearFingerprintQueueing(driveID)
+	uploading := a.clearCrawlerUploadProgress(driveID)
 	hadWorkers := a.resetDriveGenerationWorkers(ctx, driveID)
-	stopped := canceled > 0 || queued || fingerprintQueued || hadWorkers
-	log.Printf("[tasks] stop drive=%s stopped=%v canceled_tasks=%d queued=%v fingerprint_queue=%v workers=%v",
-		driveID, stopped, canceled, queued, fingerprintQueued, hadWorkers)
+	stopped := canceled > 0 || queued || fingerprintQueued || uploading || hadWorkers
+	log.Printf("[tasks] stop drive=%s stopped=%v canceled_tasks=%d queued=%v fingerprint_queue=%v uploading=%v workers=%v",
+		driveID, stopped, canceled, queued, fingerprintQueued, uploading, hadWorkers)
 	return stopped
 }
 
@@ -1323,6 +1437,9 @@ func (a *App) stopAllDriveTasks(ctx context.Context) int {
 		stoppedIDs[id] = struct{}{}
 	}
 	for _, id := range a.clearAllFingerprintQueueing() {
+		stoppedIDs[id] = struct{}{}
+	}
+	for _, id := range a.clearAllCrawlerUploadProgress() {
 		stoppedIDs[id] = struct{}{}
 	}
 	for _, id := range a.resetAllDriveGenerationWorkers(ctx) {
@@ -1679,13 +1796,21 @@ func (a *App) cleanupMissingDriveVideos(ctx context.Context, driveID string, liv
 	return removed, nil
 }
 
-func (a *App) deleteVideo(ctx context.Context, videoID string) (api.DeleteVideoResult, error) {
+func (a *App) deleteVideo(ctx context.Context, videoID string, deleteSource bool) (api.DeleteVideoResult, error) {
 	if a == nil || a.cat == nil {
 		return api.DeleteVideoResult{}, sql.ErrNoRows
 	}
 	v, err := a.cat.GetVideo(ctx, videoID)
 	if err != nil {
 		return api.DeleteVideoResult{}, err
+	}
+
+	deletedSource := false
+	if deleteSource {
+		deletedSource, err = a.removeVideoSourceFile(ctx, v)
+		if err != nil {
+			return api.DeleteVideoResult{}, err
+		}
 	}
 
 	localDir := ""
@@ -1695,14 +1820,59 @@ func (a *App) deleteVideo(ctx context.Context, videoID string) (api.DeleteVideoR
 	if err := removeLocalVideoAssets(localDir, v); err != nil {
 		return api.DeleteVideoResult{}, fmt.Errorf("remove local assets for %s: %w", v.ID, err)
 	}
-	deletedSource, err := a.removeSpider91SourceFile(ctx, v)
-	if err != nil {
-		return api.DeleteVideoResult{}, err
-	}
 	if err := a.cat.DeleteVideoWithTombstone(ctx, v.ID); err != nil {
 		return api.DeleteVideoResult{}, err
 	}
 	return api.DeleteVideoResult{OK: true, DeletedSource: deletedSource}, nil
+}
+
+func (a *App) removeVideoSourceFile(ctx context.Context, v *catalog.Video) (bool, error) {
+	if v == nil {
+		return false, errors.New("remove video source: empty video")
+	}
+	if a == nil {
+		return false, fmt.Errorf("remove video source %s: app unavailable: %w", v.ID, drives.ErrNotSupported)
+	}
+	if strings.HasPrefix(v.ID, "spider91-") {
+		deleted, err := a.removeSpider91SourceFile(ctx, v)
+		if err != nil || deleted {
+			return deleted, err
+		}
+		if a.cat != nil {
+			if drive, driveErr := a.cat.GetDrive(ctx, v.DriveID); driveErr == nil && drive.Kind == spider91.Kind {
+				return false, nil
+			}
+		} else if strings.HasPrefix(v.ID, "spider91-"+v.DriveID+"-") {
+			return false, nil
+		}
+	}
+	fileID := strings.TrimSpace(v.FileID)
+	if fileID == "" {
+		return false, fmt.Errorf("remove video source %s: empty file id", v.ID)
+	}
+	if a == nil || a.registry == nil {
+		return false, fmt.Errorf("remove video source %s: drive registry unavailable: %w", v.ID, drives.ErrNotSupported)
+	}
+	if _, ok := a.registry.Get(v.DriveID); !ok {
+		if a.cat == nil {
+			return false, fmt.Errorf("remove video source %s: drive %s not attached: %w", v.ID, v.DriveID, drives.ErrNotSupported)
+		}
+		if err := a.ensureDriveAttached(ctx, v.DriveID); err != nil {
+			return false, fmt.Errorf("remove video source %s: attach drive %s: %w", v.ID, v.DriveID, err)
+		}
+	}
+	drv, ok := a.registry.Get(v.DriveID)
+	if !ok {
+		return false, fmt.Errorf("remove video source %s: drive %s not attached: %w", v.ID, v.DriveID, drives.ErrNotSupported)
+	}
+	remover, ok := drv.(drives.Remover)
+	if !ok {
+		return false, fmt.Errorf("remove video source %s: drive %s (%s) does not support source deletion: %w", v.ID, v.DriveID, drv.Kind(), drives.ErrNotSupported)
+	}
+	if err := remover.Remove(ctx, fileID); err != nil {
+		return false, fmt.Errorf("remove video source %s from drive %s: %w", v.ID, v.DriveID, err)
+	}
+	return true, nil
 }
 
 func (a *App) removeSpider91SourceFile(ctx context.Context, v *catalog.Video) (bool, error) {
@@ -2642,8 +2812,8 @@ func (a *App) runScriptCrawlerCrawlWithTaskContext(ctx context.Context, driveID 
 	if runErr != nil {
 		log.Printf("[scriptcrawler] drive=%s crawl failed: %v", driveID, runErr)
 	} else if res != nil {
-		log.Printf("[scriptcrawler] drive=%s crawl done target=%d total=%d new=%d skipped=%d failed=%d seen_snapshot=%d",
-			driveID, res.TargetNew, res.TotalEntries, res.NewVideos, res.Skipped, res.Failed, res.SeenSnapshot)
+		log.Printf("[scriptcrawler] drive=%s crawl done target=%d candidate_budget=%d total=%d new=%d skipped=%d failed=%d seen_snapshot=%d",
+			driveID, res.TargetNew, res.CandidateBudget, res.TotalEntries, res.NewVideos, res.Skipped, res.Failed, res.SeenSnapshot)
 	}
 
 	if d.Credentials == nil {

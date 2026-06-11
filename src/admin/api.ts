@@ -121,6 +121,8 @@ export type DriveGenerationStatus = {
   cooldownUntil?: string;
   scannedCount: number;
   addedCount: number;
+  doneCount: number;
+  totalCount: number;
 };
 
 export function listDrives() {
@@ -206,6 +208,7 @@ export type AdminCrawler = {
   thumbnailGenerationStatus?: DriveGenerationStatus;
   previewGenerationStatus?: DriveGenerationStatus;
   fingerprintGenerationStatus?: DriveGenerationStatus;
+  uploadGenerationStatus?: DriveGenerationStatus;
   thumbnailReadyCount: number;
   thumbnailPendingCount: number;
   thumbnailFailedCount: number;
@@ -483,10 +486,13 @@ export function updateVideo(id: string, body: UpdateVideoInput) {
   });
 }
 
-export function deleteVideo(id: string) {
+export function deleteVideo(id: string, options: { deleteSource?: boolean } = {}) {
   return request<{ ok: boolean; deletedSource: boolean }>(
     `/videos/${encodeURIComponent(id)}`,
-    { method: "DELETE" }
+    {
+      method: "DELETE",
+      body: JSON.stringify({ deleteSource: !!options.deleteSource }),
+    }
   );
 }
 

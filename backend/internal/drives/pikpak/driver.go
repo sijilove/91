@@ -356,6 +356,19 @@ func (d *Driver) Rename(ctx context.Context, fileID, newName string) error {
 	return nil
 }
 
+func (d *Driver) Remove(ctx context.Context, fileID string) error {
+	fileID = strings.TrimSpace(fileID)
+	if fileID == "" {
+		return errors.New("pikpak remove: empty file id")
+	}
+	if err := d.request(ctx, filesURL+":batchTrash", http.MethodPost, func(req *resty.Request) {
+		req.SetBody(map[string]any{"ids": []string{fileID}})
+	}, nil); err != nil {
+		return fmt.Errorf("pikpak remove: %w", err)
+	}
+	return nil
+}
+
 func (d *Driver) EnsureDir(ctx context.Context, pathFromRoot string) (string, error) {
 	currentID := d.rootID
 	for _, name := range splitPath(pathFromRoot) {
@@ -565,3 +578,4 @@ func ParseBoolDefault(raw string, def bool) bool {
 }
 
 var _ drives.Drive = (*Driver)(nil)
+var _ drives.Remover = (*Driver)(nil)

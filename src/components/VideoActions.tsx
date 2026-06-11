@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
-import { EyeOff, ThumbsDown, ThumbsUp } from "lucide-react";
+import { EyeOff, ThumbsDown, ThumbsUp, Trash2 } from "lucide-react";
 import type { VideoDetail } from "@/types";
 import { formatCount } from "@/lib/format";
 
 type Props = {
   video: VideoDetail;
   onHideVideo: () => void;
+  onDeleteVideo: () => void;
   hideSaving?: boolean;
+  deleteSaving?: boolean;
 };
 
 /**
@@ -19,7 +21,13 @@ type Props = {
  * - 后端只有点赞计数接口，点踩仅本地 state。
  * - 失败回滚已经处理。
  */
-export function VideoActions({ video, onHideVideo, hideSaving }: Props) {
+export function VideoActions({
+  video,
+  onHideVideo,
+  onDeleteVideo,
+  hideSaving,
+  deleteSaving,
+}: Props) {
   const [likes, setLikes] = useState(video.likes ?? 0);
   const [dislikes, setDislikes] = useState(video.dislikes ?? 0);
   const [bursting, setBursting] = useState(false);
@@ -120,6 +128,17 @@ export function VideoActions({ video, onHideVideo, hideSaving }: Props) {
       >
         <EyeOff size={16} />
         <span>{hideSaving ? "处理中" : "不再显示"}</span>
+      </button>
+
+      <button
+        type="button"
+        className="vd-actions__btn vd-actions__delete"
+        onClick={onDeleteVideo}
+        disabled={deleteSaving}
+        aria-label="删除这个视频"
+      >
+        <Trash2 size={16} />
+        <span>{deleteSaving ? "删除中" : "删除"}</span>
       </button>
     </div>
   );

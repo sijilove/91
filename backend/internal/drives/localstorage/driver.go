@@ -257,6 +257,39 @@ func (d *Driver) EnsureDir(context.Context, string) (string, error) {
 	return "", drives.ErrNotSupported
 }
 
+func (d *Driver) Remove(ctx context.Context, fileID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p, rel, err := d.pathForID(fileID)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if rel == "" {
+		return errors.New("localstorage: refusing to remove root")
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if info.IsDir() {
+		return errors.New("localstorage: refusing to remove directory")
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("localstorage: refusing to remove non-regular file")
+	}
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func (d *Driver) root() (string, error) {
 	raw := strings.TrimSpace(d.rootPath)
 	if raw == "" {
@@ -275,6 +308,8 @@ func (d *Driver) root() (string, error) {
 	}
 	return filepath.Abs(raw)
 }
+
+var _ drives.Remover = (*Driver)(nil)
 
 func (d *Driver) pathForID(id string) (string, string, error) {
 	root, err := d.root()

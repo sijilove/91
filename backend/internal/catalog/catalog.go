@@ -88,6 +88,11 @@ type Video struct {
 func (c *Catalog) UpsertVideo(ctx context.Context, v *Video) error {
 	existed := c.videoExists(ctx, v.ID)
 	v.ContentHash = normalizeContentHash(v.ContentHash)
+	v.SampledSHA256 = normalizeContentHash(v.SampledSHA256)
+	fingerprintStatus := nullableStatus(v.FingerprintStatus)
+	if v.SampledSHA256 != "" && (v.FingerprintStatus == "" || v.FingerprintStatus == "pending") {
+		fingerprintStatus = "ready"
+	}
 	tagsJSON, _ := json.Marshal(v.Tags)
 	badgesJSON, _ := json.Marshal(v.Badges)
 	now := time.Now().UnixMilli()
@@ -98,13 +103,13 @@ func (c *Catalog) UpsertVideo(ctx context.Context, v *Video) error {
 
 	_, err := c.db.ExecContext(ctx, `
 INSERT INTO videos (
-  id, drive_id, file_id, file_name, content_hash, parent_id, title, author, tags,
+  id, drive_id, file_id, file_name, content_hash, sampled_sha256, fingerprint_status, fingerprint_error, parent_id, title, author, tags,
   duration_seconds, size_bytes, ext, quality, thumbnail_url, thumbnail_status,
   preview_file_id, preview_local, preview_status,
   views, favorites, comments, likes, dislikes,
   category, hidden, badges, description, published_at, created_at, updated_at
 ) VALUES (
-  ?, ?, ?, ?, ?, ?, ?, ?, ?,
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
   ?, ?, ?, ?, ?, CASE WHEN COALESCE(?, '') != '' THEN 'ready' ELSE 'pending' END,
   ?, ?, ?,
   ?, ?, ?, ?, ?,
@@ -123,15 +128,18 @@ ON CONFLICT(id) DO UPDATE SET
                       ELSE videos.content_hash
                     END,
   sampled_sha256  = CASE
-                      WHEN videos.size_bytes != excluded.size_bytes THEN ''
+                      WHEN videos.size_bytes != excluded.size_bytes THEN excluded.sampled_sha256
+                      WHEN excluded.sampled_sha256 != '' THEN excluded.sampled_sha256
                       ELSE videos.sampled_sha256
                     END,
   fingerprint_status = CASE
-                      WHEN videos.size_bytes != excluded.size_bytes THEN 'pending'
+                      WHEN videos.size_bytes != excluded.size_bytes THEN COALESCE(excluded.fingerprint_status, 'pending')
+                      WHEN excluded.sampled_sha256 != '' THEN COALESCE(excluded.fingerprint_status, 'ready')
                       ELSE COALESCE(videos.fingerprint_status, 'pending')
                     END,
   fingerprint_error = CASE
-                      WHEN videos.size_bytes != excluded.size_bytes THEN ''
+                      WHEN videos.size_bytes != excluded.size_bytes THEN COALESCE(excluded.fingerprint_error, '')
+                      WHEN excluded.sampled_sha256 != '' THEN COALESCE(excluded.fingerprint_error, '')
                       ELSE COALESCE(videos.fingerprint_error, '')
                     END,
   duration_seconds= excluded.duration_seconds,
@@ -152,7 +160,7 @@ ON CONFLICT(id) DO UPDATE SET
   description     = excluded.description,
   updated_at      = excluded.updated_at
 `,
-		v.ID, v.DriveID, v.FileID, v.FileName, v.ContentHash, v.ParentID, v.Title, v.Author, string(tagsJSON),
+		v.ID, v.DriveID, v.FileID, v.FileName, v.ContentHash, v.SampledSHA256, fingerprintStatus, v.FingerprintError, v.ParentID, v.Title, v.Author, string(tagsJSON),
 		v.DurationSeconds, v.Size, v.Ext, v.Quality, v.ThumbnailURL, v.ThumbnailURL,
 		v.PreviewFileID, v.PreviewLocal, nullableStatus(v.PreviewStatus),
 		v.Views, v.Favorites, v.Comments, v.Likes, v.Dislikes,
@@ -731,8 +739,11 @@ func (c *Catalog) ListCrawlerSourceIDs(ctx context.Context, kind, driveID string
 	rows, err := c.db.QueryContext(ctx,
 		`SELECT SUBSTR(id, ?) FROM videos WHERE id LIKE ? || '%'
 		 UNION
-		 SELECT SUBSTR(id, ?) FROM deleted_videos WHERE id LIKE ? || '%'`,
-		len(prefix)+1, prefix, len(prefix)+1, prefix)
+		 SELECT SUBSTR(id, ?) FROM deleted_videos WHERE id LIKE ? || '%'
+		 UNION
+		 SELECT source_id FROM crawler_seen_sources
+		  WHERE kind = ? AND drive_id = ? AND status IN ('imported', 'duplicate')`,
+		len(prefix)+1, prefix, len(prefix)+1, prefix, kind, driveID)
 	if err != nil {
 		return nil, err
 	}
@@ -748,6 +759,47 @@ func (c *Catalog) ListCrawlerSourceIDs(ctx context.Context, kind, driveID string
 		}
 	}
 	return out, rows.Err()
+}
+
+// MarkCrawlerSourceSeen records the outcome for a crawler source item. Duplicate
+// source IDs are included in future seen files so scripts can skip them before
+// the backend downloads the same duplicate content again.
+func (c *Catalog) MarkCrawlerSourceSeen(ctx context.Context, kind, driveID, sourceID, status, canonicalVideoID, sampledSHA256 string, size int64) error {
+	kind = strings.TrimSpace(kind)
+	driveID = strings.TrimSpace(driveID)
+	sourceID = strings.TrimSpace(sourceID)
+	status = strings.TrimSpace(status)
+	if kind == "" || driveID == "" || sourceID == "" {
+		return nil
+	}
+	switch status {
+	case "imported", "duplicate":
+	default:
+		return fmt.Errorf("catalog: unsupported crawler source status %q", status)
+	}
+	sampledSHA256 = normalizeContentHash(sampledSHA256)
+	if size < 0 {
+		size = 0
+	}
+	now := time.Now().UnixMilli()
+	_, err := c.db.ExecContext(ctx, `
+INSERT INTO crawler_seen_sources (
+  kind, drive_id, source_id, status, canonical_video_id, sampled_sha256, size_bytes, first_seen_at, last_seen_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(kind, drive_id, source_id) DO UPDATE SET
+  status = excluded.status,
+  canonical_video_id = excluded.canonical_video_id,
+  sampled_sha256 = CASE
+                    WHEN excluded.sampled_sha256 != '' THEN excluded.sampled_sha256
+                    ELSE crawler_seen_sources.sampled_sha256
+                   END,
+  size_bytes = CASE
+                WHEN excluded.size_bytes > 0 THEN excluded.size_bytes
+                ELSE crawler_seen_sources.size_bytes
+               END,
+  last_seen_at = excluded.last_seen_at`,
+		kind, driveID, sourceID, status, strings.TrimSpace(canonicalVideoID), sampledSHA256, size, now, now)
+	return err
 }
 
 // DeleteVideoWithTombstone records that an administrator explicitly deleted a
@@ -919,6 +971,29 @@ func (c *Catalog) FindVideoByFileSignature(ctx context.Context, fileName string,
 		 WHERE file_name = ? AND size_bytes = ?
 		 ORDER BY created_at ASC, id ASC
 		 LIMIT 1`, fileName, size)
+	return scanVideo(row)
+}
+
+// FindEquivalentVideo returns the earliest visible video that represents the
+// same content as source by strong hash or sampled fingerprint, regardless of
+// which drive currently owns it.
+func (c *Catalog) FindEquivalentVideo(ctx context.Context, source *Video) (*Video, error) {
+	if source == nil {
+		return nil, sql.ErrNoRows
+	}
+	where, args, ok := equivalentVideoLookupWhere(source)
+	if !ok {
+		return nil, sql.ErrNoRows
+	}
+	args = append([]any{source.ID}, args...)
+	row := c.db.QueryRowContext(ctx,
+		`SELECT `+allVideoCols+` FROM videos
+		 WHERE id != ?
+		   AND COALESCE(hidden, 0) = 0
+		   AND COALESCE(file_id, '') != ''
+		   AND (`+where+`)
+		 ORDER BY created_at ASC, id ASC
+		 LIMIT 1`, args...)
 	return scanVideo(row)
 }
 

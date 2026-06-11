@@ -28,7 +28,9 @@ python3 /path/to/crawler.py --job /path/to/job.json
   "mode": "crawl",
   "run_id": "20260609T120000Z",
   "crawler_id": "example",
-  "target_new": 10,
+  "target_new": 100,
+  "unique_target": 10,
+  "candidate_budget": 100,
   "seen_source_ids_file": "/data/scriptcrawlers/example/.crawl/seen.txt",
   "output_dir": "/data/scriptcrawlers/example/output",
   "config": {
@@ -39,6 +41,14 @@ python3 /path/to/crawler.py --job /path/to/job.json
   }
 }
 ```
+
+`unique_target` is the user's requested number of content-unique new videos.
+`candidate_budget` is how many candidate items the script should emit at most.
+For backward compatibility, `target_new` is set to the same value as
+`candidate_budget`, because older scripts only read `target_new`.
+
+The backend may skip candidates that are already present by sampled content
+fingerprint. Skipped duplicate candidates do not count toward `unique_target`.
 
 ## Importing Scripts
 
@@ -118,4 +128,6 @@ Optional progress/done events:
   `output_dir`.
 - Scripts can read `seen_source_ids_file` and skip known IDs when they provide
   stable `source_id` values. The backend still dedupes every item.
-- The backend stops the process after `target_new` new videos are imported.
+- The backend stops the process after `unique_target` content-unique new videos
+  are imported. Scripts should stop after emitting `candidate_budget` candidates
+  even if the backend has not reached `unique_target`.

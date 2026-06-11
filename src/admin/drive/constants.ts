@@ -72,6 +72,7 @@ export function nightlyBusyText(status: { running: boolean; queued: boolean }) {
 
 export function generationStateLabel(state: string): string {
   if (state === "scanning") return "扫盘中";
+  if (state === "uploading") return "上传中";
   if (state === "generating") return "生成中";
   if (state === "cooling") return "冷却中";
   if (state === "queued") return "排队中";
@@ -79,8 +80,8 @@ export function generationStateLabel(state: string): string {
 }
 
 export function generationStateClass(state: string): string {
-  if (state === "scanning" || state === "generating" || state === "cooling" || state === "queued") {
-    if (state === "scanning") return "generating";
+  if (state === "scanning" || state === "uploading" || state === "generating" || state === "cooling" || state === "queued") {
+    if (state === "scanning" || state === "uploading") return "generating";
     return state;
   }
   return "idle";

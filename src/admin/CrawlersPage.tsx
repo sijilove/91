@@ -30,7 +30,7 @@ import { generationStateClass, generationStateLabel } from "./drive/constants";
 import { Spider91UploadTargetField } from "./drive/Spider91UploadTargetField";
 import { SpiderIcon } from "./icons/SpiderIcon";
 
-const BUSY_STATES = new Set(["scanning", "generating", "queued"]);
+const BUSY_STATES = new Set(["scanning", "generating", "uploading", "queued"]);
 const POLL_INTERVAL_MS = 5000;
 const UPLOAD_TARGET_KINDS = new Set(["p115", "pikpak", "p123", "googledrive", "onedrive"]);
 
@@ -43,7 +43,8 @@ function crawlerBusy(crawler: api.AdminCrawler) {
     statusBusy(crawler.scanGenerationStatus) ||
     statusBusy(crawler.thumbnailGenerationStatus) ||
     statusBusy(crawler.previewGenerationStatus) ||
-    statusBusy(crawler.fingerprintGenerationStatus)
+    statusBusy(crawler.fingerprintGenerationStatus) ||
+    statusBusy(crawler.uploadGenerationStatus)
   );
 }
 
@@ -273,12 +274,14 @@ function crawlerStages(crawler: api.AdminCrawler): StageInfo[] {
     { key: "thumbnail", label: "封面", status: crawler.thumbnailGenerationStatus },
     { key: "preview", label: "预览", status: crawler.previewGenerationStatus },
     { key: "fingerprint", label: "指纹", status: crawler.fingerprintGenerationStatus },
+    { key: "upload", label: "上传", status: crawler.uploadGenerationStatus },
   ];
 }
 
 function stageStateLabel(stage: StageInfo): string {
   const state = stage.status?.state || "idle";
   if (stage.key === "scan" && state === "scanning") return "抓取中";
+  if (stage.key === "upload" && state === "uploading") return "上传中";
   return generationStateLabel(state);
 }
 
@@ -364,6 +367,7 @@ function CrawlerRow({
 
 function CrawlerDetail({ crawler }: { crawler: api.AdminCrawler }) {
   const scan = crawler.scanGenerationStatus;
+  const upload = crawlerUploadDisplayStatus(crawler);
   return (
     <div className="admin-crawler-detail">
       <div className="admin-crawler-detail__grid">
@@ -373,10 +377,19 @@ function CrawlerDetail({ crawler }: { crawler: api.AdminCrawler }) {
           stateText={scan?.state === "scanning" ? "抓取中" : generationStateLabel(scan?.state || "idle")}
           counts={[
             { label: "累计爬取", value: crawler.totalCrawledCount ?? 0 },
-            { label: "本地保留", value: crawler.localVideoCount ?? 0 },
-            { label: "已上传", value: crawler.migratedVideoCount ?? 0 },
             { label: "本轮检查", value: scan?.scannedCount ?? 0 },
             { label: "本轮新增", value: scan?.addedCount ?? 0 },
+          ]}
+        />
+        <GenStageCard
+          label="上传"
+          status={upload.status}
+          stateText={upload.text}
+          counts={[
+            { label: "已上传", value: crawler.migratedVideoCount ?? 0 },
+            { label: crawler.uploadDriveId ? "待上传" : "本地保留", value: crawler.localVideoCount ?? 0 },
+            { label: "本轮处理", value: upload.status.doneCount ?? 0 },
+            { label: "本轮总数", value: upload.status.totalCount ?? 0 },
           ]}
         />
         <GenStageCard
@@ -415,6 +428,49 @@ function CrawlerDetail({ crawler }: { crawler: api.AdminCrawler }) {
       )}
     </div>
   );
+}
+
+function crawlerUploadDisplayStatus(crawler: api.AdminCrawler): {
+  status: api.DriveGenerationStatus;
+  text: string;
+} {
+  const live = crawler.uploadGenerationStatus;
+  const state = live?.state || "idle";
+  const localCount = crawler.localVideoCount ?? 0;
+  const totalCount = crawler.totalCrawledCount ?? 0;
+  const base: api.DriveGenerationStatus = {
+    state,
+    currentTitle: live?.currentTitle,
+    queueLength: live?.queueLength ?? 0,
+    cooldownUntil: live?.cooldownUntil,
+    scannedCount: live?.scannedCount ?? 0,
+    addedCount: live?.addedCount ?? 0,
+    doneCount: live?.doneCount ?? 0,
+    totalCount: live?.totalCount ?? 0,
+  };
+
+  if (!crawler.uploadDriveId) {
+    return {
+      status: base,
+      text: localCount > 0 ? "本地保存" : generationStateLabel(state),
+    };
+  }
+  if (state === "uploading") {
+    return { status: base, text: "上传中" };
+  }
+  if (state === "queued") {
+    return { status: base, text: "排队中" };
+  }
+  if (localCount > 0) {
+    return {
+      status: { ...base, state: "queued", queueLength: localCount },
+      text: "待上传",
+    };
+  }
+  if (totalCount > 0) {
+    return { status: base, text: "完成" };
+  }
+  return { status: base, text: generationStateLabel(state) };
 }
 
 function GenStageCard({

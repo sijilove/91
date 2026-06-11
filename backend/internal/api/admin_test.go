@@ -121,6 +121,63 @@ func TestHandleSetupStoresCredentialsAndCreatesSession(t *testing.T) {
 	}
 }
 
+func TestHandleDeleteVideoDefaultsDeleteSourceFalse(t *testing.T) {
+	req := httptest.NewRequest(http.MethodDelete, "/admin/api/videos/video-1", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "video-1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	called := false
+	(&AdminServer{
+		OnDeleteVideo: func(ctx context.Context, videoID string, deleteSource bool) (DeleteVideoResult, error) {
+			called = true
+			if videoID != "video-1" {
+				t.Fatalf("videoID = %q, want video-1", videoID)
+			}
+			if deleteSource {
+				t.Fatal("deleteSource defaulted to true")
+			}
+			return DeleteVideoResult{OK: true}, nil
+		},
+	}).handleDeleteVideo(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	if !called {
+		t.Fatal("OnDeleteVideo was not called")
+	}
+}
+
+func TestHandleDeleteVideoPassesDeleteSourceOption(t *testing.T) {
+	req := httptest.NewRequest(http.MethodDelete, "/admin/api/videos/video-1", strings.NewReader(`{"deleteSource":true}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "video-1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	(&AdminServer{
+		OnDeleteVideo: func(ctx context.Context, videoID string, deleteSource bool) (DeleteVideoResult, error) {
+			if !deleteSource {
+				t.Fatal("deleteSource = false, want true")
+			}
+			return DeleteVideoResult{OK: true, DeletedSource: true}, nil
+		},
+	}).handleDeleteVideo(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	var got DeleteVideoResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !got.DeletedSource {
+		t.Fatalf("DeletedSource = false, want true; response = %s", rr.Body.String())
+	}
+}
+
 func TestHandleCheckUpdateReportsNewRelease(t *testing.T) {
 	dir := t.TempDir()
 	versionFile := filepath.Join(dir, ".version")

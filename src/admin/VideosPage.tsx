@@ -27,8 +27,10 @@ export function VideosPage() {
   const [batchRegening, setBatchRegening] = useState(false);
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
+  const [batchDeleteSource, setBatchDeleteSource] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<api.AdminVideo | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteSource, setDeleteSource] = useState(false);
   const pageSize = useVideosPageSize();
   const { show } = useToast();
 
@@ -100,6 +102,7 @@ export function VideosPage() {
 
   async function handleBatchDelete() {
     if (selectedIds.size === 0) return;
+    setBatchDeleteSource(false);
     setBatchDeleteOpen(true);
   }
 
@@ -127,14 +130,15 @@ export function VideosPage() {
     const target = deleteTarget;
     setDeleting(true);
     try {
-      const result = await api.deleteVideo(target.id);
+      const result = await api.deleteVideo(target.id, { deleteSource });
       setDeleteTarget(null);
+      setDeleteSource(false);
       setSelectedIds((ids) => {
         const next = new Set(ids);
         next.delete(target.id);
         return next;
       });
-      show(result.deletedSource ? "已删除视频，并清理 91Spider 源文件" : "已删除视频", "success");
+      show(result.deletedSource ? "已删除视频，并清理源文件" : "已删除视频", "success");
       if (listItems.length === 1 && page > 1) {
         setPage((p) => Math.max(1, p - 1));
       } else {
@@ -156,7 +160,7 @@ export function VideosPage() {
       let deletedSources = 0;
       for (const id of ids) {
         try {
-          const result = await api.deleteVideo(id);
+          const result = await api.deleteVideo(id, { deleteSource: batchDeleteSource });
           success++;
           if (result.deletedSource) deletedSources++;
         } catch {
@@ -165,13 +169,14 @@ export function VideosPage() {
       }
       const failed = ids.length - success;
       if (failed === 0) {
-        const extra = deletedSources > 0 ? `，其中 ${deletedSources} 个清理了 91Spider 源文件` : "";
+        const extra = deletedSources > 0 ? `，其中 ${deletedSources} 个清理了源文件` : "";
         show(`批量删除完成，成功 ${success} 个${extra}`, "success");
       } else {
         show(`批量删除完成，成功 ${success} / ${ids.length} 个，失败 ${failed} 个`, success > 0 ? "info" : "error");
       }
       setSelectedIds(new Set());
       setBatchDeleteOpen(false);
+      setBatchDeleteSource(false);
       if (success >= listItems.length && page > 1) {
         setPage((p) => Math.max(1, p - 1));
       } else {
@@ -363,7 +368,15 @@ export function VideosPage() {
                     <button type="button" className="admin-btn" onClick={() => handleRegen(v)} title="重生预览视频">
                       <RefreshCw size={13} />
                     </button>{" "}
-                    <button type="button" className="admin-btn is-danger" onClick={() => setDeleteTarget(v)} title="删除视频">
+                    <button
+                      type="button"
+                      className="admin-btn is-danger"
+                      onClick={() => {
+                        setDeleteSource(false);
+                        setDeleteTarget(v);
+                      }}
+                      title="删除视频"
+                    >
                       <Trash2 size={13} />
                     </button>
                   </td>
@@ -443,10 +456,26 @@ export function VideosPage() {
         modalClassName="admin-modal--delete-confirm"
         loading={deleting}
         onCancel={() => {
-          if (!deleting) setDeleteTarget(null);
+          if (!deleting) {
+            setDeleteTarget(null);
+            setDeleteSource(false);
+          }
         }}
         onConfirm={confirmDeleteVideo}
-      />
+      >
+        <label className="admin-delete-source-option">
+          <input
+            type="checkbox"
+            checked={deleteSource}
+            disabled={deleting}
+            onChange={(e) => setDeleteSource(e.target.checked)}
+          />
+          <span>
+            <strong>同时删除网盘中的源文件</strong>
+            <small>开启后会先删除源文件，失败则不会删除管理库记录。</small>
+          </span>
+        </label>
+      </ConfirmModal>
       <ConfirmModal
         open={batchDeleteOpen}
         title="批量删除视频"
@@ -457,10 +486,26 @@ export function VideosPage() {
         modalClassName="admin-modal--delete-confirm"
         loading={batchDeleting}
         onCancel={() => {
-          if (!batchDeleting) setBatchDeleteOpen(false);
+          if (!batchDeleting) {
+            setBatchDeleteOpen(false);
+            setBatchDeleteSource(false);
+          }
         }}
         onConfirm={confirmBatchDelete}
-      />
+      >
+        <label className="admin-delete-source-option">
+          <input
+            type="checkbox"
+            checked={batchDeleteSource}
+            disabled={batchDeleting}
+            onChange={(e) => setBatchDeleteSource(e.target.checked)}
+          />
+          <span>
+            <strong>同时删除网盘中的源文件</strong>
+            <small>开启后会先删除源文件，失败的视频会保留管理库记录。</small>
+          </span>
+        </label>
+      </ConfirmModal>
     </section>
   );
 }

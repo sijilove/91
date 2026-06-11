@@ -11,6 +11,7 @@ import (
 	"time"
 
 	sdk "github.com/OpenListTeam/wopan-sdk-go"
+	"github.com/go-resty/resty/v2"
 	"github.com/video-site/backend/internal/drives"
 )
 
@@ -145,6 +146,22 @@ func (d *Driver) Upload(ctx context.Context, parentID, name string, r io.Reader,
 	return fid, nil
 }
 
+func (d *Driver) Remove(ctx context.Context, fileID string) error {
+	if d.client == nil {
+		return fmt.Errorf("wopan remove: driver not initialized")
+	}
+	fileID = strings.TrimSpace(fileID)
+	if fileID == "" {
+		return fmt.Errorf("wopan remove: empty file id")
+	}
+	if err := d.client.DeleteFile(d.spaceType(), nil, []string{fileID}, func(req *resty.Request) {
+		req.SetContext(ctx)
+	}); err != nil {
+		return fmt.Errorf("wopan remove: %w", err)
+	}
+	return nil
+}
+
 func (d *Driver) EnsureDir(ctx context.Context, pathFromRoot string) (string, error) {
 	parts := splitPath(pathFromRoot)
 	currentID := d.rootID
@@ -229,3 +246,4 @@ func guessMime(name string) string {
 
 // 确保实现接口
 var _ drives.Drive = (*Driver)(nil)
+var _ drives.Remover = (*Driver)(nil)
