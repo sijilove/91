@@ -1114,6 +1114,19 @@ func (q *videoQueue) release(v *catalog.Video) {
 	q.mu.Unlock()
 }
 
+func (q *videoQueue) idsSnapshot() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.ids) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(q.ids))
+	for id := range q.ids {
+		out = append(out, id)
+	}
+	return out
+}
+
 func (q *videoQueue) lengthExcluding(currentID string) int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -1239,6 +1252,13 @@ func (w *Worker) Status() TaskStatus {
 	}
 	currentID, _ := w.activity.current()
 	return taskStatus(&w.activity, &w.rateLimit, w.queue.lengthExcluding(currentID))
+}
+
+func (w *Worker) ActiveVideoIDs() []string {
+	if w == nil {
+		return nil
+	}
+	return w.queue.idsSnapshot()
 }
 
 func (w *ThumbWorker) Status() TaskStatus {

@@ -65,9 +65,10 @@ type AdminServer struct {
 	// 处理完候选列表后任务自然结束。
 	OnStartDriveTranscode func(driveID string) (bool, string)
 	// OnStopDriveTranscode 手动停止某盘正在进行的转码任务。返回是否有任务被停。
-	OnStopDriveTranscode       func(driveID string) bool
-	OnDeleteVideo              func(ctx context.Context, videoID string, deleteSource bool) (DeleteVideoResult, error)
-	GetDriveGenerationStatuses func() map[string]DriveGenerationStatuses
+	OnStopDriveTranscode         func(driveID string) bool
+	OnDeleteVideo                func(ctx context.Context, videoID string, deleteSource bool) (DeleteVideoResult, error)
+	GetDriveGenerationStatuses   func() map[string]DriveGenerationStatuses
+	GetPreviewGenerationVideoIDs func() map[string]bool
 	// OnTeaserEnabledChanged 在 per-drive 预览视频开关被切换后调用。
 	// enabled=true 时上层应该重新把 pending 预览视频入队（类似旧的全局开关从关到开）；
 	// enabled=false 时通常不用做事 —— worker 入队前会再次查 catalog，自然停止。
@@ -1930,6 +1931,14 @@ func (a *AdminServer) handleAdminListVideos(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
+	}
+	if a.GetPreviewGenerationVideoIDs != nil {
+		generating := a.GetPreviewGenerationVideoIDs()
+		for _, item := range items {
+			if item != nil && generating[item.ID] {
+				item.PreviewStatus = "generating"
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": items,

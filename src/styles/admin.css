@@ -1898,6 +1898,7 @@
 .admin-status.is-ok { background: var(--success-soft); color: var(--success); }
 .admin-status.is-error { background: var(--danger-soft); color: var(--danger); }
 .admin-status.is-pending { background: var(--warning-soft); color: var(--warning); }
+.admin-status.is-generating { background: var(--info-soft); color: var(--info); }
 
 .admin-generation-state.is-generating { background: var(--info-soft); color: var(--info); }
 .admin-generation-state.is-cooling { background: var(--warning-soft); color: var(--warning); }

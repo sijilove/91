@@ -247,6 +247,9 @@ func main() {
 		GetDriveGenerationStatuses: func() map[string]api.DriveGenerationStatuses {
 			return app.driveGenerationStatuses()
 		},
+		GetPreviewGenerationVideoIDs: func() map[string]bool {
+			return app.previewGenerationVideoIDs()
+		},
 		OnTeaserEnabledChanged: func(driveID string, enabled bool) {
 			// 从关到开时立刻补扫该盘 pending 预览视频，行为对齐旧的"全局开关从关到开"。
 			// 关闭分支不需要做事 —— 入队前会重新查 catalog，新的 enqueue 自然停。
@@ -652,6 +655,23 @@ func (a *App) driveGenerationStatuses() map[string]api.DriveGenerationStatuses {
 		status := out[id]
 		status.Transcode = generationStatusFromTranscode(worker.Status())
 		out[id] = status
+	}
+	return out
+}
+
+func (a *App) previewGenerationVideoIDs() map[string]bool {
+	a.mu.Lock()
+	previewWorkers := make([]*preview.Worker, 0, len(a.workers))
+	for _, worker := range a.workers {
+		previewWorkers = append(previewWorkers, worker)
+	}
+	a.mu.Unlock()
+
+	out := make(map[string]bool)
+	for _, worker := range previewWorkers {
+		for _, id := range worker.ActiveVideoIDs() {
+			out[id] = true
+		}
 	}
 	return out
 }

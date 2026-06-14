@@ -2504,6 +2504,80 @@ func TestHandleAdminListVideosPaginates(t *testing.T) {
 	}
 }
 
+func TestHandleAdminListVideosMarksActivePreviewGeneration(t *testing.T) {
+	ctx := context.Background()
+	cat, err := catalog.Open(t.TempDir() + "/catalog.db")
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := cat.Close(); err != nil {
+			t.Fatalf("close catalog: %v", err)
+		}
+	})
+
+	now := time.Now()
+	for _, v := range []*catalog.Video{
+		{
+			ID:            "active-video",
+			DriveID:       "OneDrive",
+			FileID:        "active-file",
+			Title:         "Active video",
+			PreviewStatus: "ready",
+			PublishedAt:   now,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		},
+		{
+			ID:            "idle-video",
+			DriveID:       "OneDrive",
+			FileID:        "idle-file",
+			Title:         "Idle video",
+			PreviewStatus: "ready",
+			PublishedAt:   now.Add(-time.Hour),
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		},
+	} {
+		if err := cat.UpsertVideo(ctx, v); err != nil {
+			t.Fatalf("seed video %s: %v", v.ID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/videos?driveId=OneDrive", nil)
+	rr := httptest.NewRecorder()
+	(&AdminServer{
+		Catalog: cat,
+		GetPreviewGenerationVideoIDs: func() map[string]bool {
+			return map[string]bool{"active-video": true}
+		},
+	}).handleAdminListVideos(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Items []catalog.Video `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Total != 2 || len(got.Items) != 2 {
+		t.Fatalf("response total/items = %d/%d, want 2/2", got.Total, len(got.Items))
+	}
+	statusByID := map[string]string{}
+	for _, item := range got.Items {
+		statusByID[item.ID] = item.PreviewStatus
+	}
+	if statusByID["active-video"] != "generating" {
+		t.Fatalf("active status = %q, want generating", statusByID["active-video"])
+	}
+	if statusByID["idle-video"] != "ready" {
+		t.Fatalf("idle status = %q, want ready", statusByID["idle-video"])
+	}
+}
+
 func TestHandleRegenAllPreviewsInvokesHook(t *testing.T) {
 	called := false
 	server := &AdminServer{
